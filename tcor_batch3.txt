@@ -1,0 +1,249 @@
+;cd /Users/iikura/Desktop/大気補正2/ETM03052510732
+;cd /Users/iikura/Desktop/大気補正2/ETM02063010832
+;PATH=$PATH:/Applications/itt/idl/idl81/bin:~/bin
+;export PATH
+;export LM_LICENSE_FILE=1700@133.60.124.7
+;idl ../PROGRAM/tcor_batch.txt
+
+common pdata,cls,cls1,cls2,cls3,dem,vi
+common qdata,imax,jmax,hmax,d1,d2,d3
+common rdata,d_coeff,hdata,cosb0,penv0
+common xdata,sun_el,sun_az,nband,offset,gain,per,dr1,dr2,aero0x,penv,pquick
+common ydata,penvx,aerox,refx,aeroy
+.compile '../PROGRAM/tcorx3.pro'   ; 全画素処理：パラメータの設置および処理の流れ
+.compile '../PROGRAM/analysis.pro' ; 個別画素処理：大気パラメータおよび反射率の推定
+
+;----------------------------
+;        Initialize
+;----------------------------
+hmax=4000.0             ; max elevation (m)
+
+; parameter input
+aread,'aparmx.txt'
+cosb0=cos((90.0-sun_el)*!dtor) 
+
+temp=string(aero0x,format='(f5.2)')
+f_name='TauZ'+strmid(temp,3,2)
+if file_test(f_name,/directory) eq 0 then file_mkdir,f_name
+
+; dem input
+dem=read_tiff('dem.tif',geotiff=ginfo) 
+demx=dem/1000.0
+temp=size(dem) & imax=temp[1] & jmax=temp[2] 
+inc=incident(dem,sun_el,sun_az,30.0,30.0)
+
+window,0,xsize=600,ysize=600
+tvscl,congrid(inc,600,600),order=1
+dfact=1.0
+per0=per
+
+;openw,2,f_name+'/parm.txt'
+openw,2,'/dev/tty'
+printf,2,imax,jmax
+printf,2,aero0x,per
+printf,2,penv
+printf,2,pquick
+printf,2,dfact
+close,2
+;---------------------------------
+; Mask Image from NDVI
+;-------------------------------
+vi=bytarr(imax,jmax)+1
+
+;---------------------------------
+; SAT Image Input
+;-------------------------------
+tm1=read_tiff('sat1.tif')
+tm2=read_tiff('sat2.tif')
+tm3=read_tiff('sat3.tif')
+tm4=read_tiff('sat4.tif')
+tm5=read_tiff('sat5.tif')
+tm7=read_tiff('sat7.tif')
+tm1=float(tm1) & tm2=float(tm2) & tm3=float(tm3) & tm4=float(tm4)
+
+;---------------------------------
+; Making Homogenous Class
+;-------------------------------
+; d1,d2,d3 : number of class 
+d1=30L & d2=30L & d3=30L
+;d1=256L & d2=256L & d3=256L
+; input of class data
+cls1=sconv(inc,0.3,0.99,d1)
+cls2=tinput('sat5.tif',0.2,0.99,d2)
+cls3=tinput('sat7.tif',0.2,0.99,d3)
+
+cls=lonarr(1200,1200)
+for i=0,imax-1 do for j=0,jmax-1 do $
+	cls[i,j]=cls1[i,j]+cls2[i,j]*(30L)+cls3[i,j]*30*30L
+
+mclass
+
+count=lonarr(27000)
+for i=0,1199 do for j=0,1199 do count[cls[i,j]]=count[cls[i,j]]+1
+plot,histogram(count,bin=1,min=0,max=50)
+for k=0L,26999 do if count[k] gt 100 then print,k,count[k]
+temp=where(count gt 100)
+print,n_elements(temp)
+total=0L
+for k=0,26999 do if count[k] gt 100 then total=total+count[k]
+print,float(total)/1200/1200
+
+clsx=bytarr(3,1200,1200)
+clsx[0,*,*]=cls1
+clsx[1,*,*]=cls2
+clsx[2,*,*]=cls3
+clsy=reform(clsx,3,1440000)
+clsy2=congrid(float(clsy),3,14400)
+weights=clust_wts(float(clsy2),n_clusters=300,n_iterations=10) ; n_clusterが300以上では？
+cls=cluster(clsy,weights,n_clusters=300)
+
+cls=reform(cls,1200,1200)
+count=lonarr(300)
+for i=0,1199 do for j=0,1199 do count[cls[i,j]]=count[cls[i,j]]+1
+plot,histogram(count,bin=100,min=0,max=15000)
+
+
+satc=bytarr(3,1200,1200)
+depc=bytarr(3,1200,1200)
+
+;loadct,2
+;tvlct,r,g,b,/get
+;for i=0,255 do print,r[i],g[i],b[i]
+;r[1]=255 & g[1]=0 & b[1]=0
+;r[2]=0 & g[2]=255 & b[2]=0
+;r[3]=0 & g[3]=0 & b[3]=255
+;tvlct,r,g,b
+
+;SET_PLOT, 'PS'
+
+;------------------------------
+;       Processing of Band 1
+;------------------------------
+print,'* Processing of Band 1 *'
+h_data=read_height('height01.txt')
+d_data=read_height('depth01.txt')
+xx=findgen(20)*0.05
+
+d_coeff=set_coeff(xx,d_data)
+hdata=h_data[*,8]
+
+tmx=gain[0]*tm1+offset[0]
+per=per0
+;---------------------------------------
+penv0=penv[0]
+penvx=fltarr(1200,1200)+penv0
+aerox=aero0x
+dfact=0.5
+i=0
+print,'* iteration :',i  
+iteratex,demx,inc,tmx,per, 1 
+temp=where(refx le !values.f_infinity,count,complement=tempx) 
+temp2=where(aeroy le !values.f_infinity,count,complement=temp2x) 
+penvx=smooth(refx,dr1,/nan)  
+aerox=(1.0-dfact)*aerox+dfact*xmedian(aeroy,dr2) 
+temp3=where(aerox le !values.f_infinity,count,complement=temp3x)
+print,n_elements(tempx),n_elements(temp2x),n_elements(temp3x) 
+per=0.5
+ptmp=pdata(refx,0.05,0.99)
+cls3=sconv(refx,ptmp[0],ptmp[1],d3) 
+mclass	
+;print,mean(refx,/nan),mean(aerox,/nan) & $
+;print,stddev(refx,/nan),stddev(aerox,/nan)
+
+
+for i=1,12 do begin $
+	print,'* iteration :',i  & $ 
+	iteratex,demx,inc,tmx,per, 1 & $ 
+	temp=where(refx le !values.f_infinity,count,complement=tempx) & $
+	temp2=where(aeroy le !values.f_infinity,count,complement=temp2x) & $
+	penvx=smooth(refx,dr1,/nan) & $ 
+	aerox=(1.0-dfact)*aerox+dfact*xmedian(aeroy,dr2) & $
+	temp3=where(aerox le !values.f_infinity,count,complement=temp3x) & $
+	print,n_elements(tempx),n_elements(temp2x),n_elements(temp3x) & $
+	ptmp=pdata(refx,0.05,0.99) & $
+	cls3=sconv(refx,ptmp[0],ptmp[1],d3) & $
+	mclass
+
+;set_plot,'X'
+;window,0,xsize=600,ysize=600
+;tvscl,congrid(refx,600,600)<0.06 > (-0.02),order=1
+;tvscl,congrid(aerox,600,600) <0.5 > 0.0 ,order=1
+;plot,findgen(60)*0.005-0.1,histogram(refx,bin=0.005,min=-0.1,max=0.2),yrange=[0,1000000.0]
+;plot,findgen(100)*0.005-0.1,histogram(aerox,bin=0.005,min=-0.1,max=0.4),yrange=[0,1000000.0]
+;---------------------------------------
+range=percent(refx,pquick[0],pquick[1])
+satc[2,*,*]=bytscl(refx,max=range[1],min=range[0])
+depc[2,*,*]=bytscl(aeroy,max=aero0x*3,min=0.0)
+
+write_tiff,f_name+'/ref1x.tif',refx,/float
+write_tiff,f_name+'/dep1x.tif',aeroy,/float
+
+;------------------------------
+;       Processing of Band 2
+;------------------------------
+print,'* Processing of Band 2 *'
+h_data=read_height('height02.txt')
+d_data=read_height('depth02.txt')
+xx=findgen(20)*0.05
+
+d_coeff=set_coeff(xx,d_data)
+hdata=h_data[*,8]
+
+tmx=gain[1]*tm2+offset[1]
+per=per0
+vi=bytarr(imax,jmax)+1
+;---------------------------------------
+penv0=penv[1]
+penvx=fltarr(1200,1200)+penv0
+aerox=aero0x
+for i=0,2 do begin $
+	print,'* iteration :',i  & $ 
+	iterate,demx,inc,tmx,per & $ 
+	penvx=smooth(refx,dr1,/nan) & $ 
+	aerox=median(aeroy,dr2)
+;-----------------------------------
+range=percent(refx,pquick[0],pquick[1])
+satc[1,*,*]=bytscl(refx,max=range[1],min=range[0])
+depc[1,*,*]=bytscl(aeroy,max=aero0x*3,min=0.0)
+
+write_tiff,f_name+'/ref2.tif',refx,/float
+write_tiff,f_name+'/dep2.tif',aeroy,/float
+
+;------------------------------
+;       Processing of Band 3
+;------------------------------
+print,'* Processing of Band 3 *'
+h_data=read_height('height03.txt')
+d_data=read_height('depth03.txt')
+xx=findgen(20)*0.05
+
+d_coeff=set_coeff(xx,d_data)
+hdata=h_data[*,8]
+
+tmx=gain[2]*tm3+offset[2]
+
+;---------------------------------------
+penv0=penv[2]
+penvx=fltarr(1200,1200)+penv0
+aerox=aero0x
+for i=0,2 do begin $
+	print,'* iteration :',i  & $ 
+	iterate,demx,inc,tmx,per & $ 
+	penvx=smooth(refx,dr1,/nan) & $ 
+	aerox=median(aeroy,dr2)
+
+;-----------------------------------
+range=percent(refx,pquick[0],pquick[1])
+satc[0,*,*]=bytscl(refx,max=range[1],min=range[0])
+depc[0,*,*]=bytscl(aeroy,max=aero0x*3,min=0.0)
+
+write_tiff,f_name+'/ref3.tif',refx,/float
+write_tiff,f_name+'/dep3.tif',aeroy,/float
+
+
+write_tiff,f_name+'/satc_'+'.tif',satc
+write_tiff,f_name+'/depc_'+'.tif',depc
+
+
+exit
+
